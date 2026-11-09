@@ -95,7 +95,8 @@ function Get-PublicAsset {
 
 function Invoke-CentralPromotion($Manifest,[string]$Candidate,[scriptblock]$Gh,[scriptblock]$Download,[string]$TemporaryDirectory) {
     # ONLY called from the vetted Actions workflow while its per-platform concurrency lock is held.
-    $releases=ConvertFrom-Json -InputObject (& $Gh @('api',"repos/$script:Repository/releases",'--paginate','--slurp','-q','add'))
+    $pages=ConvertFrom-Json -InputObject (& $Gh @('api',"repos/$script:Repository/releases",'--paginate','--slurp')) -NoEnumerate
+    $releases=@(foreach($page in $pages){foreach($release in $page){$release}})
     $stable=@($releases | Where-Object { $_.tag_name -ceq 'updates' })
     if ($stable.Count) {
         if ($stable[0].draft -or $stable[0].prerelease) { throw 'Stable release is not public/final.' }
