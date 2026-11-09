@@ -67,8 +67,42 @@ function Invoke-CheckedTool([string]$File,[string[]]$Arguments) {
         $out.GetAwaiter().GetResult()
     } finally { $p.Dispose() }
 }
+function Get-AnonymousUpdateFeed([string]$Url,[string]$Destination) {
+    $original=[Uri]$Url
+    if($original.Scheme -cne 'https' -or $original.Host -cne 'github.com' -or !$original.IsDefaultPort -or $original.UserInfo -or $original.Query -or $original.Fragment){throw 'Invalid public feed URL.'}
+    $match=[regex]::Match($original.AbsolutePath,'\A/Mostsport/smart-analysis-releases/releases/download/(updates|(?:windows|android)-[0-9]+(?:\.[0-9]+){2,3})/((?:windows|android)-update\.saup)\z')
+    if(!$match.Success){throw 'Feed must belong to the fixed public downloads repository.'}
+    $handler=[Net.Http.HttpClientHandler]::new();$handler.AllowAutoRedirect=$false
+    $client=[Net.Http.HttpClient]::new($handler);$client.Timeout=[TimeSpan]::FromSeconds(60);$client.DefaultRequestHeaders.UserAgent.ParseAdd('SmartAnalysis-Updater/1')
+    $cancel=[Threading.CancellationTokenSource]::new([TimeSpan]::FromMinutes(2))
+    function Read-LimitedFeedBytes($Response,[long]$Limit) {
+        if($Response.Content.Headers.ContentLength -gt $Limit){throw 'Public feed response too large.'}
+        $input=$Response.Content.ReadAsStream();$output=[IO.MemoryStream]::new()
+        try{$buffer=[byte[]]::new(8192);while(($n=$input.ReadAsync($buffer,0,$buffer.Length,$cancel.Token).GetAwaiter().GetResult()) -gt 0){if($output.Length+$n -gt $Limit){throw 'Public feed response too large.'};$output.Write($buffer,0,$n)};return ,$output.ToArray()}finally{$input.Dispose();$output.Dispose()}
+    }
+    try {
+        $tag=[Uri]::EscapeDataString($match.Groups[1].Value);$name=$match.Groups[2].Value
+        $request=[Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get,"https://api.github.com/repos/Mostsport/smart-analysis-releases/releases/tags/$tag");$request.Headers.Accept.ParseAdd('application/vnd.github+json')
+        try{$response=$client.SendAsync($request,[Net.Http.HttpCompletionOption]::ResponseHeadersRead,$cancel.Token).GetAwaiter().GetResult();try{$null=$response.EnsureSuccessStatusCode();$metadata=[Text.Encoding]::UTF8.GetString((Read-LimitedFeedBytes $response 1048576))|ConvertFrom-Json}finally{$response.Dispose()}}finally{$request.Dispose()}
+        $assets=@($metadata.assets|Where-Object {$_.name -ceq $name})
+        if($assets.Count -ne 1){throw 'Ambiguous or missing public feed asset.'}
+        $asset=$assets[0]
+        if([string]$asset.id -cnotmatch '^[1-9][0-9]{0,18}$' -or $asset.state -cne 'uploaded' -or $asset.size -le 0 -or $asset.size -gt 32768 -or $asset.browser_download_url -cne $Url){throw 'Public feed metadata identity mismatch.'}
+        $uri=[Uri]("https://api.github.com/repos/Mostsport/smart-analysis-releases/releases/assets/"+$asset.id)
+        for($i=0;$i -lt 5;$i++){
+            $request=[Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get,$uri);$request.Headers.Accept.ParseAdd('application/octet-stream')
+            try{$response=$client.SendAsync($request,[Net.Http.HttpCompletionOption]::ResponseHeadersRead,$cancel.Token).GetAwaiter().GetResult();try{
+                if([int]$response.StatusCode -in @(301,302,303,307,308)){$next=[Uri]::new($uri,$response.Headers.Location);if($next.Scheme -cne 'https' -or !$next.IsDefaultPort -or $next.UserInfo -or $next.Fragment -or $next.Host -notin @('release-assets.githubusercontent.com','objects.githubusercontent.com')){throw 'Unsafe public feed redirect.'};$uri=$next;continue}
+                $null=$response.EnsureSuccessStatusCode();$bytes=Read-LimitedFeedBytes $response 32768;[IO.File]::WriteAllBytes($Destination,$bytes);return
+            }finally{$response.Dispose()}}finally{$request.Dispose()}
+        }
+        throw 'Too many public feed redirects.'
+    }finally{$cancel.Dispose();$client.Dispose();$handler.Dispose()}
+}
+
 function Get-PublicAsset {
     param($url,$destination)
+    if(([Uri]$url).AbsolutePath.EndsWith('.saup')){Get-AnonymousUpdateFeed $url $destination;return}
     $handler=[Net.Http.HttpClientHandler]::new(); $handler.AllowAutoRedirect=$false
     $client=[Net.Http.HttpClient]::new($handler); $client.Timeout=[TimeSpan]::FromMinutes(5)
     $timeout=[Threading.CancellationTokenSource]::new([TimeSpan]::FromMinutes(5))
