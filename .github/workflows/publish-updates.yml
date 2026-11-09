@@ -1,0 +1,50 @@
+name: Smart Analysis signed feed promotion
+run-name: Smart Analysis publish ${{ inputs.requestId }}
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        type: choice
+        options: [windows, android]
+        required: true
+      version:
+        type: string
+        required: true
+      manifestSha256:
+        type: string
+        required: true
+      expectedCommit:
+        type: string
+        required: true
+      requestId:
+        type: string
+        required: true
+permissions:
+  contents: write
+# A new queued request may replace an older pending request; a running job is never cancelled.
+# Local callers await their OWN correlated run and report cancellation as failure, never success.
+concurrency:
+  group: smart-analysis-stable-${{ inputs.platform }}
+  cancel-in-progress: false
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Verify vetted revision and promote under the platform lock
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_PLATFORM: ${{ inputs.platform }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_MANIFEST_SHA: ${{ inputs.manifestSha256 }}
+          INPUT_COMMIT: ${{ inputs.expectedCommit }}
+          INPUT_REQUEST_ID: ${{ inputs.requestId }}
+        run: |
+          $ErrorActionPreference='Stop'
+          if ($env:GITHUB_REPOSITORY -cne 'Mostsport/smart-analysis-releases' -or $env:GITHUB_SHA -cne $env:INPUT_COMMIT -or $env:INPUT_REQUEST_ID -cnotmatch '^[a-f0-9]{32}$') { throw 'Unvetted workflow revision/repository/request.' }
+          $encoded=gh api "repos/$env:GITHUB_REPOSITORY/contents/tools/Verify-PublishFeed.ps1?ref=$env:GITHUB_SHA" --jq '.content'
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot fetch verifier at vetted revision.' }
+          $path=Join-Path $env:RUNNER_TEMP 'Verify-PublishFeed.ps1'
+          [IO.File]::WriteAllBytes($path,[Convert]::FromBase64String(($encoded -join '')))
+          & $path -Platform $env:INPUT_PLATFORM -Version $env:INPUT_VERSION -ManifestSha256 $env:INPUT_MANIFEST_SHA
